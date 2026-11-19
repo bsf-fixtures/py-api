@@ -1,0 +1,23 @@
+# The sidecar Postgres the service needs to run or be tested.
+#
+# This is deliberately a throwaway: a well-known password, a tmpfs volume, and
+# a database name that is obviously not anyone's real one. The sandbox points
+# DATABASE_URL here, and nothing in the app reads a .env file, so a test run
+# cannot reach a real database just because a developer's credentials are
+# lying around.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pyapi
+      POSTGRES_PASSWORD: pyapi-throwaway
+      POSTGRES_DB: pyapi_test
+    ports:
+      - "5432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pyapi -d pyapi_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

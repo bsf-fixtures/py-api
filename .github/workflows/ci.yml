@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The sidecar this fixture exists to exercise. Reaching a published
+    # service port from inside gh-aw's agent sandbox needs the
+    # docker-sudo-iptables runtime, which is the trade-off this fixture
+    # is here to prove out.
+    services:
+      db:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: pyapi
+          POSTGRES_PASSWORD: pyapi-throwaway
+          POSTGRES_DB: pyapi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pyapi -d pyapi_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql+psycopg://pyapi:pyapi-throwaway@localhost:5432/pyapi_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: mypy app
+      - run: pytest --cov=app --cov-report=term-missing
