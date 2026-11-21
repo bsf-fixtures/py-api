@@ -1,0 +1,12 @@
+{
+  "role": "verifier",
+  "needs": "A way for the verifier to reach the database at DATABASE_URL, and a way to apply the manifest's `seed` command, from the container the verifier actually runs in. Acceptance check 6 is phrased as `DELETE FROM readings against DATABASE_URL` and check 1 presumes `the sandbox seed applied`, but the verifier container can reach neither the database nor the manifest's seed command.",
+  "paths": [
+    ".factory/sandbox/manifest.json",
+    ".factory/definition/context/runbook.md"
+  ],
+  "why": "When /tmp/gh-aw/agent/bsf/app.json is present the app runs on the runner, and only its HTTP port is bridged to the verifier at http://host.docker.internal:8787. The database is not: from the verifier container, 127.0.0.1:5432 is connection-refused and host.docker.internal:5432 times out, so no psql/SQLAlchemy statement can be issued against DATABASE_URL. The manifest's `seed` command has the same problem - it is a .venv/bin/python one-liner that imports app.db and connects to DATABASE_URL directly, so it cannot be run from here either. Both checks were still satisfied in this run, by HTTP-only equivalents rather than by what the check literally names: the readings table was already empty when verification began (GET /sensors returned 200 and [], GET /readings?limit=1000 returned [], confirming zero rows), and the seed was reproduced by POSTing the manifest's own five seed rows through POST /readings - the same write path commands.seed uses, via app/models.py Reading and app/db.py session(). Neither substitute weakens this particular verdict, because GROUP BY over an empty table does not depend on how the table became empty, and the seeded rows are byte-identical in sensor and celsius to commands.seed. But a future check that needs a state the HTTP API cannot construct - rows with backdated recorded_at, a partially-populated table, a row the API refuses to write - would be unverifiable here, and would have to be reported as not-run rather than passed. Exposing the service port to the verifier, or providing a `seed`/`reset` step the verifier can invoke on the runner, would close the gap.",
+  "work_item": "wi_01M7YCYXNYV7TD9KTEV15G0BVF",
+  "reported_at": "2026-11-21T07:21:27.117Z",
+  "reports": 1
+}
