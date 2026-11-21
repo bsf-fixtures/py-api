@@ -1,0 +1,16 @@
+{
+  "schema": "ledger/1",
+  "updated_at": "2026-11-21T04:05:58.696Z",
+  "open": [
+    {
+      "work_item": "wi_01M7Y4GJS8FDFMPE9JFHY603DW",
+      "pipeline": "product_work",
+      "status": "waiting_trust",
+      "fingerprint": "sha256:072f2ee178614c3af056df9f6906debee50da6570d9efb770eff3c6c1d2af44b",
+      "priority": "normal",
+      "created_at": "2026-11-21T04:05:58.696Z"
+    }
+  ],
+  "recent": [],
+  "merge_queue": []
+}
