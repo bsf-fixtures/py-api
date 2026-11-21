@@ -1,0 +1,13 @@
+fastapi.tiangolo.com
+www.starlette.io
+docs.pydantic.dev
+docs.sqlalchemy.org
+www.psycopg.org
+www.uvicorn.org
+www.postgresql.org
+docs.pytest.org
+pytest-cov.readthedocs.io
+docs.astral.sh
+mypy.readthedocs.io
+setuptools.pypa.io
+docs.python.org
