@@ -18,6 +18,12 @@ class ReadingOut(BaseModel):
     recorded_at: datetime
 
 
+class SensorOut(BaseModel):
+    sensor: str
+    count: int
+    latest_reading_at: datetime
+
+
 class SensorSummary(BaseModel):
     sensor: str
     count: int
