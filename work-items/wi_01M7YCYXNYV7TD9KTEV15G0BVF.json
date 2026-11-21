@@ -21,5 +21,88 @@
   "pr": null,
   "parent": null,
   "related": [],
-  "spec": null
+  "spec": {
+    "plan": "Today there is no way to discover which sensors exist: a caller has to already know a sensor name before GET /sensors/{sensor}/summary is useful, and nothing lists them. After this change GET /sensors returns 200 and a JSON array with one object per sensor that has at least one reading - {\"sensor\": str, \"count\": int, \"latest_reading_at\": datetime} - ordered by sensor name ascending, and an empty array when the readings table holds no rows. Two decisions the builder should not re-open: (1) the aggregation is a single SQL GROUP BY in the handler, not a pure helper in app/summary.py, because the repo's \"keep arithmetic away from the session\" rule is about arithmetic that can be done on values already in hand - grouping in Python would mean loading the whole table, and there is no arithmetic here beyond COUNT and MAX; (2) an empty table is 200 with [], not 404, because \"an empty result is not zero\" is about refusing to invent a neutral value for one named sensor, and an empty list of sensors is the true answer rather than an invented one. Nothing else changes: app/models.py, app/db.py, app/settings.py and app/summary.py are untouched, no new table, no migration, no new dependency. The existing /sensors/{sensor}/summary route keeps working - the two paths differ in segment count and do not shadow each other (verified).",
+    "files": [
+      "app/schemas.py",
+      "app/main.py",
+      "tests/test_api.py"
+    ],
+    "feature_folders": [
+      "app/",
+      "tests/"
+    ],
+    "acceptance_checks": [
+      "With the sandbox seed applied (kitchen x3, garage x2) and no other rows, `curl -s http://127.0.0.1:8000/sensors` returns HTTP 200 and a JSON array of exactly two objects, the first with \"sensor\":\"garage\" and the second with \"sensor\":\"kitchen\" - ascending by sensor name.",
+      "In that same response the kitchen object has \"count\": 3 and the garage object has \"count\": 2 - one entry per sensor, counting its readings, not one entry per reading.",
+      "POST a reading for a sensor name that has never been used (`curl -s -X POST http://127.0.0.1:8000/readings -H 'content-type: application/json' -d '{\"sensor\":\"attic\",\"celsius\":4.0}'`), then GET /sensors: an object with \"sensor\":\"attic\" and \"count\":1 is now present, and its \"latest_reading_at\" is byte-for-byte the \"recorded_at\" value the POST returned.",
+      "POST a second reading for that same sensor, then GET /sensors again: the attic object's \"count\" is 2 and its \"latest_reading_at\" has advanced to the second POST's \"recorded_at\" - the field is the latest reading's time, not the first.",
+      "A sensor name that has never been posted does not appear: in the GET /sensors response from the previous check, no object has \"sensor\":\"no-such-sensor\".",
+      "With the table emptied (`DELETE FROM readings` against DATABASE_URL), `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/sensors` prints 200 and the body is `[]` - not a 404 and not an error.",
+      "GET /sensors/kitchen/summary still returns 200 with count 3, and GET /sensors/nope/summary still returns 404 - adding /sensors did not shadow the existing summary route."
+    ],
+    "tests_added": [
+      "tests/test_api.py::test_sensors_lists_each_sensor_once_with_its_reading_count - POST two readings under sensor \"test-sensors-a\" and one under \"test-sensors-b\", GET /sensors, and assert the entry for each has the expected count. Assert by looking the sensor up in the response, never by asserting the length of the whole list: the suite and the sandbox seed both leave other sensors in the table.",
+      "tests/test_api.py::test_sensors_are_ordered_by_name - GET /sensors and assert the list of \"sensor\" values equals its own sorted() copy. Self-contained whatever else is in the table.",
+      "tests/test_api.py::test_sensors_reports_the_time_of_the_most_recent_reading - POST two readings under \"test-sensors-latest\", keep both \"recorded_at\" values from the responses, and assert that entry's \"latest_reading_at\" equals the second one and not the first.",
+      "tests/test_api.py::test_a_sensor_that_never_reported_is_absent_from_the_list - GET /sensors and assert no entry has sensor \"test-sensors-never\", a name nothing posts."
+    ],
+    "tests_changed": [
+      "tests/test_api.py"
+    ],
+    "research": [
+      {
+        "claim": "The request is exactly: list every sensor with at least one reading, with its reading count and its latest reading's time, ordered by sensor name. Field set and ordering come from that sentence; nothing beyond it is in scope.",
+        "source": "https://github.com/bsf-fixtures/py-api/issues/9 - the issue body, read in full."
+      },
+      {
+        "claim": "`/sensors` is the right path and does not shadow the existing `/sensors/{sensor}/summary` route; declaration order does not matter.",
+        "source": "ran: prototyped both routes in a scratch copy and read GET /openapi.json - paths were ['/health', '/readings', '/sensors', '/sensors/{sensor}/summary'], and GET /sensors/kitchen/summary still returned 200 while GET /sensors/nope/summary still returned 404. Existing route at app/main.py:63."
+      },
+      {
+        "claim": "The response model is `SensorOut(sensor: str, count: int, latest_reading_at: datetime)` in app/schemas.py. `count` matches the name SensorSummary already uses for a row count; `latest_reading_at` is named after the `recorded_at` column it is the MAX of.",
+        "source": "app/schemas.py:21 (SensorSummary.count) and app/models.py:19 (Reading.recorded_at)."
+      },
+      {
+        "claim": "The handler pattern to follow: build the statement, `with session() as db:`, then construct the pydantic model explicitly from the columns rather than handing back ORM rows. app/db.py's session() is the only way to get a Session and the new handler uses it.",
+        "source": "app/main.py:49-60 (list_readings), app/db.py:29."
+      },
+      {
+        "claim": "Reading the aggregates off the Row by name does NOT type-check: `.label('count')` plus `row.count` fails mypy strict with `List comprehension has incompatible type List[tuple[Any, Callable[[Any], int], Any]]`, because Row subclasses tuple and `.count` resolves to `tuple.count`. Unpack the row instead - `for sensor, count, latest in db.execute(stmt).all()` - which is clean. No `# type: ignore`; there is none anywhere in this repo.",
+        "source": "ran: `.venv/bin/mypy --strict` on both forms against this repo's app package, mypy 2.4.1 with strict = true; then `.venv/bin/mypy app` and `.venv/bin/ruff check .` (ruff 0.17.6) on the full prototype - both clean."
+      },
+      {
+        "claim": "`select(Reading.sensor, func.count(Reading.id), func.max(Reading.recorded_at)).group_by(Reading.sensor).order_by(Reading.sensor)` returns exactly what is needed, in ascending name order, with count already a Python int and the max already a tz-aware datetime - no post-processing. Against an empty table it returns [], which is where the 200-with-[] behaviour comes from rather than from a guess.",
+        "source": "ran: that statement against a real PostgreSQL on 127.0.0.1:5432 with rows for kitchen x2, garage x1, attic x1 - got [('attic', 1, datetime), ('garage', 1, datetime), ('kitchen', 2, datetime)]; then `DELETE FROM readings` and re-ran it - got []."
+      },
+      {
+        "claim": "latest_reading_at serializes in the same ISO-8601 UTC form as ReadingOut.recorded_at, so acceptance check 3 can compare the two strings directly.",
+        "source": "ran: the prototype through fastapi.testclient - GET /sensors returned 200 and [{\"sensor\":\"attic\",\"count\":2,\"latest_reading_at\":\"2026-11-21T06:56:33.470833Z\"}, ...], matching the recorded_at the POST had returned."
+      },
+      {
+        "claim": "The new handler's lines are uncovered without new tests, so the four tests listed are what carries the diff past the 80% diff-coverage floor. The existing 18 tests all pass unchanged with the endpoint added.",
+        "source": "ran: `.venv/bin/pytest -q --cov=app --cov-report=term-missing` on the prototype with no new tests - 18 passed, 93% total, new handler lines listed under Missing for app/main.py. Floor is .factory/guardrails/coverage.json#diff_min_pct = 80."
+      },
+      {
+        "claim": "The sandbox can exercise every acceptance check here: the seed gives kitchen x3 and garage x2 (the expected counts in checks 1 and 2), and a fifth read-only HTTP endpoint is the same class of thing the manifest already claims to exercise. Nothing in capabilities.not_exercised is touched, since app/models.py and app/db.py are not in `files`.",
+        "source": ".factory/sandbox/manifest.json - commands.seed, capabilities.exercised, capabilities.not_exercised."
+      },
+      {
+        "claim": "New tests must name their sensors `test-sensors-*` and must assert by looking an entry up, never by asserting the length of the whole list. The suite leaves its rows behind and the sandbox's test command deletes only `sensor LIKE 'test-%'`; the seeded kitchen and garage rows remain, so `len(body) == 2` would pass once and fail on a seeded or re-run database.",
+        "source": ".factory/definition/context/history.md - the first two lessons; .factory/sandbox/manifest.json#commands.test, whose preamble is the DELETE."
+      },
+      {
+        "claim": "All three files are inside what this pipeline may change, and editing tests/test_api.py has to be declared.",
+        "source": ".factory/definition/policy.yaml - pipelines.product_work.may_change = [code, tests]; tests.declared_edits = required; none of the three files matches paths.protected, paths.guardrails, paths.definition, paths.baselines or paths.coverage."
+      },
+      {
+        "claim": "The two house rules this change could be read as breaking - \"An empty result is not zero\" and \"Keep arithmetic away from the session\" - are not broken by it, for the reasons given in `plan`. The four test names are written in the repo's \"a test name states its claim\" register.",
+        "source": ".factory/definition/context/fundamentals.md - Taste section. .factory/definition/context/practices.md has no practices recorded yet, so there is none to contradict."
+      },
+      {
+        "claim": "list_sensors needs `.all()` on the Result, not `.scalars().all()`: scalars() collapses to the first column, which is what the other two read handlers want and this one does not.",
+        "source": "https://docs.sqlalchemy.org/en/21/orm/queryguide/select.html - \"Selecting ORM Entities and Attributes\" / Result rows; SQLAlchemy 2.1.9 is what installs here, pyproject.toml pins `sqlalchemy>=2.0`."
+      }
+    ]
+  }
 }
