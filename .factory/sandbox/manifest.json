@@ -1,0 +1,189 @@
+{
+  "schema": "sandbox/1",
+  "tier": "renders",
+  "tier_reason": null,
+  "commands": {
+    "install": "PY=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3); \"$PY\" -m venv .venv && .venv/bin/pip install --quiet --disable-pip-version-check -e '.[dev]'",
+    "build": ".venv/bin/ruff check . && .venv/bin/mypy app",
+    "run": ".venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000",
+    "test": ".venv/bin/python -c '\nimport sys, time\n\nfrom sqlalchemy import text\n\nfrom app.db import create_all, engine\n\nlast = None\nfor _ in range(60):\n    try:\n        create_all()\n        break\n    except Exception as exc:\n        last = exc\n        time.sleep(1)\nelse:\n    sys.exit(\"the sandbox database never answered at DATABASE_URL: %s\" % last)\n\nwith engine().begin() as conn:\n    n = conn.execute(\n        text(\"DELETE FROM readings WHERE sensor LIKE :prefix\"), {\"prefix\": \"test-%\"}\n    ).rowcount\nprint(\"database ready; cleared %d row(s) left by a previous test run\" % n)\n' && .venv/bin/pytest --cov=app --cov-report=term-missing",
+    "seed": ".venv/bin/python -c '\nfrom app.db import create_all, session\nfrom app.models import Reading\n\ncreate_all()\nrows = [(\"kitchen\", 21.5), (\"kitchen\", 19.0), (\"kitchen\", 23.25),\n        (\"garage\", 8.5), (\"garage\", 11.0)]\nwith session() as db:\n    for sensor, celsius in rows:\n        db.add(Reading(sensor=sensor, celsius=celsius))\nprint(\"seeded %d readings across 2 sensors\" % len(rows))\n'"
+  },
+  "app_url": "http://127.0.0.1:8000/docs",
+  "env": [
+    {
+      "name": "DATABASE_URL",
+      "kind": "service",
+      "value": "postgresql+psycopg://pyapi:pyapi-throwaway@127.0.0.1:5432/pyapi_test",
+      "why": "The only variable this repo reads. app/settings.py:18 is the single os.environ call in app/, and tests/conftest.py:16 is the only other one; nothing loads a .env file, which README.md states is deliberate. It points at the throwaway Postgres sidecar declared under services, never at anything real: the app creates its tables at startup and the test suite writes rows, so whatever this names gets written to. 127.0.0.1 is literal rather than 'localhost' as the README and ci.yml use, because localhost can resolve to ::1 where a service bound to 127.0.0.1 does not answer."
+    }
+  ],
+  "services": [
+    {
+      "name": "db",
+      "image": "postgres:17-alpine",
+      "port": 5432,
+      "why": "The service cannot start without a database: the FastAPI lifespan in app/main.py:21-23 calls Base.metadata.create_all(), and /health runs a real SELECT 1 through a session, so it answers only when Postgres does. Seven of the eighteen tests (tests/test_api.py) need it. postgres:17-alpine is the image the repo's own compose.yaml and .github/workflows/ci.yml already use. The credentials are the repo's published throwaway ones and the container is started with --rm and no volume, so it holds nothing worth keeping.",
+      "env": {
+        "POSTGRES_USER": "pyapi",
+        "POSTGRES_PASSWORD": "pyapi-throwaway",
+        "POSTGRES_DB": "pyapi_test"
+      },
+      "ready": "port"
+    }
+  ],
+  "egress": [
+    "cdn.jsdelivr.net",
+    "fastapi.tiangolo.com"
+  ],
+  "stubs": [],
+  "dropped": [
+    {
+      "from": "compose.yaml",
+      "what": "the tmpfs mount at /var/lib/postgresql/data",
+      "why": "That is how compose makes the database throwaway. The sandbox starts the container with `docker run --rm` and no volume, which gets the same result, and the manifest's service schema has no tmpfs field to carry it."
+    },
+    {
+      "from": "compose.yaml",
+      "what": "the pg_isready healthcheck",
+      "why": "The sandbox's only readiness option is a TCP port check (`ready: port`), and an open port is not proof the database will accept a connection. The test command makes up the difference with a real psycopg connect that retries for 60s, so an unready database fails the step rather than producing a confusing test error."
+    },
+    {
+      "from": "compose.yaml",
+      "what": "publishing 5432 on every interface (`ports: - \"5432:5432\"`)",
+      "why": "The sandbox binds the service to 127.0.0.1 only. Nothing outside the sandbox has any business reaching it."
+    },
+    {
+      "from": "README.md",
+      "what": "`docker compose up -d db`",
+      "why": "Compose is how a person starts the sidecar on a laptop. The sandbox starts the same postgres:17-alpine image itself from `services`, so the database is declared in one place for the factory rather than two that can drift."
+    },
+    {
+      "from": "README.md",
+      "what": "`uvicorn app.main:app --reload`",
+      "why": "--reload starts a file-watching supervisor that re-execs a child process. The trial stops the app by signalling its process group, and a supervisor makes what is actually running harder to reason about. The sandbox runs one non-reloading process."
+    },
+    {
+      "from": ".github/workflows/ci.yml",
+      "what": "`actions/setup-python@v5` pinned to Python 3.12",
+      "why": "That provisions a CI runner's interpreter; the sandbox has no Actions steps. install picks the newest interpreter already present that satisfies requires-python >= 3.11 and builds a venv from it. Measured at setup: 3.13.18."
+    },
+    {
+      "from": ".github/workflows/ci.yml",
+      "what": "DATABASE_URL pointed at `localhost`",
+      "why": "`localhost` can resolve to ::1, where a service bound to 127.0.0.1 does not answer. The sandbox uses the literal 127.0.0.1 for both DATABASE_URL and app_url."
+    },
+    {
+      "from": ".github/workflows/ci.yml",
+      "what": "`pip install -e '.[dev]'` against the runner's system interpreter",
+      "why": "setup-python makes that safe in CI. Without it, Ubuntu 24.04 marks its system Python externally managed (PEP 668) and refuses the install. The sandbox uses a venv at .venv/ and calls its binaries by path, so no command depends on which interpreter is first on PATH."
+    }
+  ],
+  "capabilities": {
+    "exercised": [
+      "All four HTTP endpoints against a real PostgreSQL 17: GET /health, POST /readings, GET /readings, GET /sensors/{sensor}/summary.",
+      "The whole test suite with the database present - 18 passed, including the 7 in tests/test_api.py that skip when DATABASE_URL is unset. 96% total coverage via pytest-cov.",
+      "Table creation from app/models.py by Base.metadata.create_all() in the FastAPI startup lifespan.",
+      "SQLAlchemy ORM reads and writes through app/db.py's session() context manager, including its commit-on-success and rollback-on-exception path.",
+      "Pydantic validation at the edge: 422 for a reading below -273.15C or above 1000C, and for an empty sensor name.",
+      "The 404 for a sensor with no readings, rather than a summary of zeros (app/summary.py:14 raising, app/main.py:72 translating).",
+      "The clamp on GET /readings?limit= to 1..1000 (app/main.py:51).",
+      "/health as a genuine readiness check: it executes SELECT 1 through a session, so it fails when the database is gone.",
+      "ruff check . and mypy app under strict = true, the two static checks CI runs before pytest.",
+      "The rendered Swagger UI at http://127.0.0.1:8000/docs in a real browser - all four operations and all five schemas, captured as a full-page screenshot."
+    ],
+    "not_exercised": [
+      {
+        "what": "Schema migrations, and any change to an existing table that already holds rows.",
+        "paths": [
+          "app/models.py"
+        ],
+        "why": "There is no migration tool in this repo - no alembic/ directory and nothing in pyproject.toml's dependencies. The app calls Base.metadata.create_all(), which creates tables that do not exist and never alters one that does. The sandbox's database is empty at every start, so a column change that would break a populated table passes here."
+      },
+      {
+        "what": "Durability: data surviving a restart, retention, or backup.",
+        "paths": [
+          "app/db.py",
+          "app/models.py"
+        ],
+        "why": "The sidecar runs from `docker run --rm` with no volume, so every run starts with an empty database. Nothing here can tell a change that preserves data from one that silently discards it."
+      },
+      {
+        "what": "Connection pooling and concurrency.",
+        "paths": [
+          "app/db.py"
+        ],
+        "why": "The engine's pool_pre_ping (app/db.py:19) and the module-level engine and sessionmaker singletons are only ever driven one request at a time here. Pool exhaustion, a session leaking across requests, and reconnecting after the database drops a connection are all unreached."
+      },
+      {
+        "what": "How the database connection is secured - TLS, sslmode, or any credential handling.",
+        "paths": [
+          "app/settings.py",
+          "app/db.py"
+        ],
+        "why": "DATABASE_URL points at a throwaway Postgres over loopback with a published password and no sslmode. A change to how the connection string is built, or to what the app does when a credential is absent, has no realistic case here."
+      },
+      {
+        "what": "Any PostgreSQL version, extension or configuration other than postgres:17-alpine's defaults.",
+        "why": "The sandbox pins the image the repo's own compose.yaml and CI use. What the owner actually runs is not recorded anywhere in this repo, so version-specific SQL or a dependency on an extension would pass here and fail there."
+      }
+    ]
+  },
+  "episode": [
+    {
+      "attempt": 1,
+      "tried": "Read pyproject.toml, README.md, compose.yaml, .github/workflows/ci.yml and every file in app/ and tests/ before running anything, specifically to find every place the code reads configuration.",
+      "observed": "app/settings.py:18 and tests/conftest.py:16 are the only two reads of the environment in the repo, both of DATABASE_URL. Nothing imports dotenv or reads a settings file; README.md and the app/settings.py docstring both say that is deliberate. There is no Dockerfile, no deploy script and no outbound HTTP client anywhere in app/.",
+      "changed": "Settled the shape of the manifest from reading alone: exactly one env variable of kind `service`, exactly one sidecar, and no stubs."
+    },
+    {
+      "attempt": 2,
+      "tried": "Installed the project into a venv and ran `ruff check .` and `mypy app` to see whether the repo's own static checks are clean as it stands.",
+      "observed": "ruff 0.17.6 passed. mypy 2.4.1 under strict = true found no issues in 7 source files. There is no `# type: ignore` anywhere in the repo.",
+      "changed": "Made those two the `build` command. Python has no compile step, and these are the nearest equivalent and the two things CI runs before pytest."
+    },
+    {
+      "attempt": 3,
+      "tried": "Ran `pytest -rs` with DATABASE_URL unset, the way a laptop with no sidecar would.",
+      "observed": "11 passed, 7 skipped, exit 0. Every test in tests/test_api.py skipped. A sandbox that got DATABASE_URL wrong would therefore report a green test run having exercised no database at all, and would look identical to one that got it right.",
+      "changed": "Put a psycopg connect-retry in front of pytest in the `test` command, so the database's presence is a precondition of the step rather than something the tests discover and quietly route around."
+    },
+    {
+      "attempt": 4,
+      "tried": "Read how `bsf sandbox trial` brings up a service, since this agent has no Docker and could not try it directly.",
+      "observed": "It runs `docker run -d --rm --name bsf-<name> -p 127.0.0.1:<port>:<port>` and then waits up to 90s for that TCP port to open. Host and container port come from the same field, so the service port must be the image's own 5432, and an open port is not proof Postgres will accept a connection.",
+      "changed": "Left port at 5432 and kept the connect-retry in `test` as the real readiness check, rather than relying on the port probe."
+    },
+    {
+      "attempt": 5,
+      "tried": "Docker is unavailable to this agent, so instead started the PostgreSQL 18 server already installed in this sandbox on 127.0.0.1:5432 with the manifest's own throwaway user, password and database name, and ran the exact install, build, test, seed and run command strings against it.",
+      "observed": "install exit 0 (venv on Python 3.13.18). build exit 0. test: 18 passed, 96% total coverage. seed: 'seeded 5 readings across 2 sensors', after which GET /sensors/kitchen/summary returned count 3, min 19.0, max 23.25, mean 21.25. uvicorn answered http://127.0.0.1:8000/docs with 200 two seconds after start; /health returned {\"status\":\"ok\"}, which happens only when the database answers; POST /readings with celsius -400 returned 422; /sensors/nope/summary returned 404.",
+      "changed": "Nothing. The commands are in this manifest exactly as they were run."
+    },
+    {
+      "attempt": 6,
+      "tried": "Opened app_url in a real browser and took a full-page screenshot, which is what the trial does to decide between `renders` and `build_and_test`.",
+      "observed": "Swagger UI rendered completely: page title 'py-api - Swagger UI', all four operations and all five schemas legible. One console error, for the favicon at fastapi.tiangolo.com, blocked by this agent's own firewall. cdn.jsdelivr.net, which serves the Swagger UI bundle and stylesheet, loaded.",
+      "changed": "Added cdn.jsdelivr.net and fastapi.tiangolo.com to `egress` so a verifier's sandbox can load the page the same way, and claimed tier `renders`."
+    },
+    {
+      "attempt": 7,
+      "tried": "Validated this manifest with `.factory/bin/bsf sandbox check --file`.",
+      "observed": "'valid sandbox manifest, tier renders'. Also read the install, build, test and seed command strings back out of the written JSON and ran them again, to be sure nothing was lost escaping the embedded Python into the file.",
+      "changed": null
+    },
+    {
+      "attempt": 8,
+      "tried": "Ran the test command twice in a row against the same database, which is what a builder iterating on a change does.",
+      "observed": "The second run failed: tests/test_api.py::test_summary_reflects_the_readings_posted asserted 6 == 3. tests/test_api.py POSTs rows under sensors named test-* and never cleans them up, so the second run counts the first run's rows as well. The trial itself would not catch this, because its container is fresh - but a role that runs the tests twice in one sandbox would hit it, and the obvious wrong fix is to loosen the assertion.",
+      "changed": "Made the test command idempotent instead of the test. Its preamble now calls create_all() and then deletes only rows whose sensor is LIKE 'test-%', which is exactly what tests/test_api.py inserts and nothing else. Seed data under kitchen and garage is untouched. Folded the database readiness retry into the same block, so it uses the app's own app/db.py rather than a second idea of how to connect."
+    },
+    {
+      "attempt": 9,
+      "tried": "trial of round 1: install, build, test, run",
+      "observed": "reached renders, as claimed",
+      "changed": null
+    }
+  ],
+  "frozen_at": "2026-11-21T04:52:13.432Z"
+}

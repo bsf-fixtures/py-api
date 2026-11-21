@@ -5,34 +5,79 @@
   Every agent reads this first. The question it has to answer is "where would
   this change go?" — so it names folders and what each one owns, not what the
   product does.
-
-  {{PLACEHOLDERS}} are filled in by setup.
 -->
 
-# Feature map — {{REPO_NAME}}
+# Feature map — py-api
 
-{{ONE_LINE_WHAT_THIS_REPO_IS}}
+A FastAPI service over one Postgres table of sensor readings: four endpoints,
+seven Python modules, no frontend. It exists as a Build Software Factory
+fixture — a repo that genuinely needs a database, so the sandbox has to run a
+sidecar and verification happens at the API level rather than through a
+browser.
+
+This repo is small enough that it has no feature folders in the usual sense.
+`app/` is one feature. The table below is at folder granularity because that is
+what the template asks for; the module-level breakdown — which is what you
+actually need to place a change — is in **Shared** underneath.
 
 ## Feature folders
 
 | Folder | Owns | Depends on |
 | --- | --- | --- |
-{{FEATURE_FOLDER_ROWS}}
+| `app/` | The entire service, which is one feature: sensor readings. HTTP routing, the request and response shapes, the one ORM model, engine and session handling, and the summary arithmetic. | Nothing else in this repo. Only third-party packages: FastAPI, Starlette, SQLAlchemy, psycopg, pydantic, uvicorn. |
+| `tests/` | Every test, split by what it needs to run. `test_summary.py` and `test_schemas.py` need nothing. `test_api.py` needs the sidecar Postgres and skips without it. | `app/` |
 
 ## Shared
 
+There is no shared folder, because there is no second feature to share with.
+What follows is what each module in `app/` owns, and the rule that governs it.
+
 | Folder | What it is | Rule |
 | --- | --- | --- |
-{{SHARED_FOLDER_ROWS}}
+| `app/main.py` | The FastAPI app, the four route handlers, and the startup lifespan that calls `create_all()`. | Routes stay thin: open a session, do the query, build the response model. Arithmetic that can be done without a database belongs in `app/summary.py`. |
+| `app/schemas.py` | The pydantic request and response shapes, and the only place field bounds live — sensor 1–64 characters, celsius `> -273.15` and `<= 1000.0`. | Validation goes here, never in a handler. If a handler is re-checking something, the model is wrong. |
+| `app/models.py` | The `readings` table and the declarative `Base`. One table: id, sensor, celsius, recorded_at. | The schema is created from these models by `create_all()`. There is no migration directory, so a change here changes the table only on a database that does not already have it. |
+| `app/db.py` | The lazily-built module-level engine, the sessionmaker, and the `session()` context manager that commits on a clean exit and rolls back on an exception. | Every database access goes through `session()`. Nothing else constructs an `Engine` or a `Session`. |
+| `app/settings.py` | The single read of the environment — `DATABASE_URL` — and the `RuntimeError` raised when it is absent. | The only module that may touch `os.environ`. Nothing reads a `.env` file; see fundamentals.md for why. |
+| `app/summary.py` | Summary arithmetic: count, min, max, and a mean rounded to 4 places. Raises `ValueError` on an empty list. | Pure functions, no database import. This is what makes the summary testable without a sidecar. |
+| `tests/conftest.py` | The `database_url` and `client` fixtures. `database_url` calls `pytest.skip` when `DATABASE_URL` is unset. | A test that needs the database takes the `client` fixture, which pulls in the skip. A test that does not should import from `app.` directly and stay runnable anywhere. |
 
 ## Where things go
 
-- **A new feature** gets its own folder under {{FEATURE_ROOT}}.
-- **Something used by two features** moves to {{SHARED_ROOT}}, and not before
-  the second use. One caller is not a shared concern.
+- **A new feature** gets its own folder under `app/`. Today `app/` is flat
+  because there is exactly one feature; the first genuinely separate concern
+  is the point at which that changes, not before.
+- **Something used by two features** moves to a new `app/shared/`, and not
+  before the second use. One caller is not a shared concern. No such folder
+  exists yet, and creating one for a single caller would be the wrong move.
 - **Nothing in a feature folder imports from another feature folder.** Where
   two features need the same thing, it belongs in shared.
 
 ## Not in this repo
 
-{{OUT_OF_SCOPE}}
+Checked for and not found. Each of these is an absence an agent should know
+about before proposing a change that assumes otherwise.
+
+- **No frontend.** The only HTML the service serves is FastAPI's generated
+  Swagger UI at `/docs`, which is where a person lands. There is no template
+  directory, no static assets, and no JavaScript in the repo.
+- **No migrations.** No `alembic/`, no migration tool in `pyproject.toml`.
+  `Base.metadata.create_all()` in the startup lifespan is the whole schema
+  story, and it only ever creates tables that do not exist.
+- **No authentication, authorization, sessions or users.** Every endpoint is
+  open.
+- **No outbound HTTP.** The service calls no third-party API, which is why the
+  sandbox needs no stubs. `httpx` is a dev dependency, present only because
+  `fastapi.testclient` uses it.
+- **No `.env` loading.** Deliberate, and stated as such in both `README.md` and
+  the `app/settings.py` docstring. `python-dotenv` appears in the installed
+  tree only as a transitive dependency of `uvicorn[standard]`; no code imports
+  it.
+- **No background jobs, queue, scheduler or cache.**
+- **No Dockerfile and no deploy configuration.** `compose.yaml` exists only to
+  start the sidecar database for local work; it does not build or run the app.
+- **No logging or metrics configuration** beyond uvicorn's defaults.
+- **No lockfile.** `pyproject.toml` pins lower bounds only (`fastapi>=0.115`
+  and so on), so an install resolves to current releases. Setup measured the
+  suite green against FastAPI 0.165.0, SQLAlchemy 2.1.9, pydantic 2.14.4 and
+  psycopg 3.3.9.
