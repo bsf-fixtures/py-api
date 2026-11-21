@@ -14,7 +14,7 @@
   "body": null,
   "priority": "normal",
   "fingerprint": "sha256:3d4060dbc5f1fc4278d950d78e3ac05611281e9698089032e9a90ff971f3321f",
-  "status": "waiting_trust",
+  "status": "queued",
   "runs": [],
   "pr": null,
   "parent": null,
