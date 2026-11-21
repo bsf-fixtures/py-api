@@ -3,11 +3,11 @@
   "tier": "renders",
   "tier_reason": null,
   "commands": {
-    "install": "PY=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3); \"$PY\" -m venv .venv && .venv/bin/pip install --quiet --disable-pip-version-check -e '.[dev]'",
+    "install": "PY=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3); \"$PY\" -m venv .venv && .venv/bin/pip install --quiet --disable-pip-version-check -e '.[dev]' && cat > .venv/bin/sandbox-db <<'SANDBOX_DB'\n#!/usr/bin/env bash\n# Make DATABASE_URL answer, wherever this is running. Written by the sandbox's\n# install command; not part of the repo.\n#\n# On the runner the sandbox has already started the throwaway Postgres\n# container, so the first check succeeds and this does nothing. Inside a\n# role's agent container no port on the runner is reachable, so start an\n# equally throwaway cluster from the PostgreSQL binaries in the image, using\n# the user, password and database name DATABASE_URL already carries.\nset -euo pipefail\n: \"${DATABASE_URL:?DATABASE_URL is not set; source .factory/sandbox/.runtime.env first}\"\n\nBINDIR=$(cd \"$(dirname \"$0\")\" && pwd)\nPY=\"$BINDIR/python\"\n\neval \"$(\"$PY\" -I -c '\nimport os\nfrom urllib.parse import unquote, urlsplit\n\nu = urlsplit(os.environ[\"DATABASE_URL\"])\nprint(\"DB_HOST=%s\" % (u.hostname or \"127.0.0.1\"))\nprint(\"DB_PORT=%d\" % (u.port or 5432))\nprint(\"DB_USER=%s\" % unquote(u.username or \"postgres\"))\nprint(\"DB_NAME=%s\" % (u.path.lstrip(\"/\") or \"postgres\"))\n')\"\n\nlistening() {\n  \"$PY\" -I -c '\nimport socket, sys\ns = socket.socket()\ns.settimeout(2)\nsys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)\n' \"$DB_HOST\" \"$DB_PORT\"\n}\n\nif listening; then\n  echo \"database: $DB_HOST:$DB_PORT already answers; using it\"\n  exit 0\nfi\n\nif [ \"$DB_HOST\" != \"127.0.0.1\" ] && [ \"$DB_HOST\" != \"localhost\" ]; then\n  echo \"database: $DB_HOST:$DB_PORT does not answer and is not local, so there is nothing to start here\" >&2\n  exit 1\nfi\n\nPGBIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 || true)\nif [ -z \"$PGBIN\" ] || [ ! -x \"$PGBIN/initdb\" ]; then\n  PGBIN=$(dirname \"$(command -v initdb 2>/dev/null || echo /nonexistent/initdb)\")\nfi\nif [ ! -x \"$PGBIN/initdb\" ]; then\n  echo \"database: $DB_HOST:$DB_PORT does not answer, and this image has no PostgreSQL binaries to start one with\" >&2\n  exit 1\nfi\n\nROOT=\"${TMPDIR:-/tmp}/bsf-postgres\"\nDATA=\"$ROOT/data\"\nmkdir -p \"$ROOT\"\nif [ ! -s \"$DATA/PG_VERSION\" ]; then\n  echo \"database: nothing answers on $DB_HOST:$DB_PORT, so starting a local one with $(\"$PGBIN/initdb\" --version)\"\n  rm -rf \"$DATA\"\n  \"$PGBIN/initdb\" -D \"$DATA\" -U \"$DB_USER\" -A trust -E UTF8 >\"$ROOT/initdb.log\" 2>&1 \\\n    || { tail -20 \"$ROOT/initdb.log\" >&2; exit 1; }\nfi\n\n\"$PGBIN/pg_ctl\" -D \"$DATA\" -l \"$ROOT/server.log\" -w -t 60 \\\n  -o \"-p $DB_PORT -c listen_addresses=127.0.0.1 -k $ROOT -c fsync=off -c full_page_writes=off\" \\\n  start >/dev/null 2>&1 || { tail -20 \"$ROOT/server.log\" >&2; exit 1; }\n\n\"$PGBIN/psql\" -h 127.0.0.1 -p \"$DB_PORT\" -U \"$DB_USER\" -d postgres -tAc \\\n  \"SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'\" | grep -q 1 \\\n  || \"$PGBIN/createdb\" -h 127.0.0.1 -p \"$DB_PORT\" -U \"$DB_USER\" \"$DB_NAME\"\n\necho \"database: throwaway cluster up in $DATA on 127.0.0.1:$DB_PORT, database $DB_NAME\"\nSANDBOX_DB\nchmod +x .venv/bin/sandbox-db\n",
     "build": ".venv/bin/ruff check . && .venv/bin/mypy app",
-    "run": ".venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000",
-    "test": ".venv/bin/python -c '\nimport sys, time\n\nfrom sqlalchemy import text\n\nfrom app.db import create_all, engine\n\nlast = None\nfor _ in range(60):\n    try:\n        create_all()\n        break\n    except Exception as exc:\n        last = exc\n        time.sleep(1)\nelse:\n    sys.exit(\"the sandbox database never answered at DATABASE_URL: %s\" % last)\n\nwith engine().begin() as conn:\n    n = conn.execute(\n        text(\"DELETE FROM readings WHERE sensor LIKE :prefix\"), {\"prefix\": \"test-%\"}\n    ).rowcount\nprint(\"database ready; cleared %d row(s) left by a previous test run\" % n)\n' && .venv/bin/pytest --cov=app --cov-report=term-missing",
-    "seed": ".venv/bin/python -c '\nfrom app.db import create_all, session\nfrom app.models import Reading\n\ncreate_all()\nrows = [(\"kitchen\", 21.5), (\"kitchen\", 19.0), (\"kitchen\", 23.25),\n        (\"garage\", 8.5), (\"garage\", 11.0)]\nwith session() as db:\n    for sensor, celsius in rows:\n        db.add(Reading(sensor=sensor, celsius=celsius))\nprint(\"seeded %d readings across 2 sensors\" % len(rows))\n'"
+    "run": ".venv/bin/sandbox-db && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app",
+    "test": ".venv/bin/sandbox-db && .venv/bin/python -c '\nimport sys, time\n\nfrom sqlalchemy import text\n\nfrom app.db import create_all, engine\n\nlast = None\nfor _ in range(60):\n    try:\n        create_all()\n        break\n    except Exception as exc:\n        last = exc\n        time.sleep(1)\nelse:\n    sys.exit(\"the sandbox database never answered at DATABASE_URL: %s\" % last)\n\nwith engine().begin() as conn:\n    n = conn.execute(\n        text(\"DELETE FROM readings WHERE sensor LIKE :prefix\"), {\"prefix\": \"test-%\"}\n    ).rowcount\nprint(\"database ready; cleared %d row(s) left by a previous test run\" % n)\n' && .venv/bin/pytest --cov=app --cov-report=term-missing",
+    "seed": ".venv/bin/sandbox-db && .venv/bin/python -c '\nfrom app.db import create_all, session\nfrom app.models import Reading\n\ncreate_all()\nrows = [(\"kitchen\", 21.5), (\"kitchen\", 19.0), (\"kitchen\", 23.25),\n        (\"garage\", 8.5), (\"garage\", 11.0)]\nwith session() as db:\n    for sensor, celsius in rows:\n        db.add(Reading(sensor=sensor, celsius=celsius))\nprint(\"seeded %d readings across 2 sensors\" % len(rows))\n'"
   },
   "app_url": "http://127.0.0.1:8000/docs",
   "env": [
@@ -15,7 +15,13 @@
       "name": "DATABASE_URL",
       "kind": "service",
       "value": "postgresql+psycopg://pyapi:pyapi-throwaway@127.0.0.1:5432/pyapi_test",
-      "why": "The only variable this repo reads. app/settings.py:18 is the single os.environ call in app/, and tests/conftest.py:16 is the only other one; nothing loads a .env file, which README.md states is deliberate. It points at the throwaway Postgres sidecar declared under services, never at anything real: the app creates its tables at startup and the test suite writes rows, so whatever this names gets written to. 127.0.0.1 is literal rather than 'localhost' as the README and ci.yml use, because localhost can resolve to ::1 where a service bound to 127.0.0.1 does not answer."
+      "why": "The only variable this repo reads. app/settings.py:18 is the single os.environ call in app/, and tests/conftest.py:16 is the only other one; nothing loads a .env file, which README.md states is deliberate. It names a throwaway Postgres and never anything real: the app creates its tables at startup and the test suite writes rows, so whatever this names gets written to. 127.0.0.1 is literal rather than 'localhost' as the README and ci.yml use, because localhost can resolve to ::1 where a service bound to 127.0.0.1 does not answer. Amendment round 2: 127.0.0.1:5432 means two different databases depending on where a command runs, and that is now deliberate. On the runner it is the postgres:17-alpine sidecar under services. Inside a role's agent container, which can reach no port on the runner, `.venv/bin/sandbox-db` starts an equally throwaway cluster on that address from the image's own PostgreSQL binaries. Both are worthless databases with the credentials this repo already publishes, so the address resolving locally is the point rather than a leak."
+    },
+    {
+      "name": "WATCHFILES_FORCE_POLLING",
+      "kind": "self",
+      "value": "1",
+      "why": "The app's own run configuration, needed because commands.run is now `uvicorn --reload`. The app is started by `bsf sandbox start --serve` on the runner, while the builder edits the same files from inside its container through the bind mount at /workspace. uvicorn's reloader (watchfiles) uses inotify by default; whether inotify events raised by a writer in another mount namespace reach a watcher on the runner is the one thing this setup could not test from inside a single container, and guessing wrong costs the amendment. Polling does not depend on the answer. Measured here: with polling forced, an edit to app/main.py appeared in the running app's /openapi.json 2 seconds later, over 7 files in app/."
     }
   ],
   "services": [
@@ -23,7 +29,7 @@
       "name": "db",
       "image": "postgres:17-alpine",
       "port": 5432,
-      "why": "The service cannot start without a database: the FastAPI lifespan in app/main.py:21-23 calls Base.metadata.create_all(), and /health runs a real SELECT 1 through a session, so it answers only when Postgres does. Seven of the eighteen tests (tests/test_api.py) need it. postgres:17-alpine is the image the repo's own compose.yaml and .github/workflows/ci.yml already use. The credentials are the repo's published throwaway ones and the container is started with --rm and no volume, so it holds nothing worth keeping.",
+      "why": "The service cannot start without a database: the FastAPI lifespan in app/main.py:21-23 calls Base.metadata.create_all(), and /health runs a real SELECT 1 through a session, so it answers only when Postgres does. Seven of the eighteen tests (tests/test_api.py) need it. postgres:17-alpine is the image the repo's own compose.yaml and .github/workflows/ci.yml already use. The credentials are the repo's published throwaway ones and the container is started with --rm and no volume, so it holds nothing worth keeping. This entry also decides where roles run: bsf's needsHost() is true when a manifest has any service, which is what puts the builder and verifier on their host-access variants and lets them reach the running app on port 8787. Removing it would take that away as well as the database.",
       "env": {
         "POSTGRES_USER": "pyapi",
         "POSTGRES_PASSWORD": "pyapi-throwaway",
@@ -46,22 +52,17 @@
     {
       "from": "compose.yaml",
       "what": "the pg_isready healthcheck",
-      "why": "The sandbox's only readiness option is a TCP port check (`ready: port`), and an open port is not proof the database will accept a connection. The test command makes up the difference with a real psycopg connect that retries for 60s, so an unready database fails the step rather than producing a confusing test error."
+      "why": "The sandbox's only readiness option is a TCP port check (`ready: port`), and an open port is not proof the database will accept a connection. The test command makes up the difference with a real connect that retries for 60s, so an unready database fails the step rather than producing a confusing test error."
     },
     {
       "from": "compose.yaml",
       "what": "publishing 5432 on every interface (`ports: - \"5432:5432\"`)",
-      "why": "The sandbox binds the service to 127.0.0.1 only. Nothing outside the sandbox has any business reaching it."
+      "why": "The sandbox binds the service to 127.0.0.1 only. Nothing outside the sandbox has any business reaching it — and as amendment round 2 found, nothing inside a role's agent container can reach it either, which is why `.venv/bin/sandbox-db` exists."
     },
     {
       "from": "README.md",
       "what": "`docker compose up -d db`",
-      "why": "Compose is how a person starts the sidecar on a laptop. The sandbox starts the same postgres:17-alpine image itself from `services`, so the database is declared in one place for the factory rather than two that can drift."
-    },
-    {
-      "from": "README.md",
-      "what": "`uvicorn app.main:app --reload`",
-      "why": "--reload starts a file-watching supervisor that re-execs a child process. The trial stops the app by signalling its process group, and a supervisor makes what is actually running harder to reason about. The sandbox runs one non-reloading process."
+      "why": "Compose is how a person starts the sidecar on a laptop. The sandbox starts the same postgres:17-alpine image itself from `services`, so the database is declared in one place for the factory rather than two that can drift. Docker is also not usable from inside a role's agent container, so compose could not be the fallback there."
     },
     {
       "from": ".github/workflows/ci.yml",
@@ -76,16 +77,19 @@
     {
       "from": ".github/workflows/ci.yml",
       "what": "`pip install -e '.[dev]'` against the runner's system interpreter",
-      "why": "setup-python makes that safe in CI. Without it, Ubuntu 24.04 marks its system Python externally managed (PEP 668) and refuses the install. The sandbox uses a venv at .venv/ and calls its binaries by path, so no command depends on which interpreter is first on PATH."
+      "why": "setup-python makes that safe in CI. Without it, Ubuntu marks its system Python externally managed (PEP 668) and refuses the install. The sandbox uses a venv at .venv/ and calls its binaries by path, so no command depends on which interpreter is first on PATH."
     }
   ],
   "capabilities": {
     "exercised": [
-      "All four HTTP endpoints against a real PostgreSQL 17: GET /health, POST /readings, GET /readings, GET /sensors/{sensor}/summary.",
+      "All four HTTP endpoints against a real PostgreSQL: GET /health, POST /readings, GET /readings, GET /sensors/{sensor}/summary.",
       "The whole test suite with the database present - 18 passed, including the 7 in tests/test_api.py that skip when DATABASE_URL is unset. 96% total coverage via pytest-cov.",
+      "The same 18 tests from inside a role's agent container, which is what amendment round 2 added. `.venv/bin/sandbox-db` starts a local throwaway cluster when no sidecar is reachable, so a builder gets a real database rather than 11 passed and 7 silently skipped.",
+      "A change to a route appearing in the already-running app without restarting it. commands.run is `uvicorn --reload`, so the app `bsf sandbox start --serve` left running on the runner picks up an edit made in the agent's container. Measured: a new GET /sensors route was in /openapi.json and answering 2 seconds after the file was written.",
       "Table creation from app/models.py by Base.metadata.create_all() in the FastAPI startup lifespan.",
       "SQLAlchemy ORM reads and writes through app/db.py's session() context manager, including its commit-on-success and rollback-on-exception path.",
       "Pydantic validation at the edge: 422 for a reading below -273.15C or above 1000C, and for an empty sensor name.",
+      "Server-set timestamps at PostgreSQL's microsecond resolution: two consecutive POSTs to /readings get distinct recorded_at values. SQLite's second-resolution CURRENT_TIMESTAMP cannot show this, which is why the fallback is Postgres rather than a file database.",
       "The 404 for a sensor with no readings, rather than a summary of zeros (app/summary.py:14 raising, app/main.py:72 translating).",
       "The clamp on GET /readings?limit= to 1..1000 (app/main.py:51).",
       "/health as a genuine readiness check: it executes SELECT 1 through a session, so it fails when the database is gone.",
@@ -98,7 +102,7 @@
         "paths": [
           "app/models.py"
         ],
-        "why": "There is no migration tool in this repo - no alembic/ directory and nothing in pyproject.toml's dependencies. The app calls Base.metadata.create_all(), which creates tables that do not exist and never alters one that does. The sandbox's database is empty at every start, so a column change that would break a populated table passes here."
+        "why": "There is no migration tool in this repo - no alembic/ directory and nothing in pyproject.toml's dependencies. The app calls Base.metadata.create_all(), which creates tables that do not exist and never alters one that does. Every database the sandbox offers starts empty, so a column change that would break a populated table passes here."
       },
       {
         "what": "Durability: data surviving a restart, retention, or backup.",
@@ -106,7 +110,7 @@
           "app/db.py",
           "app/models.py"
         ],
-        "why": "The sidecar runs from `docker run --rm` with no volume, so every run starts with an empty database. Nothing here can tell a change that preserves data from one that silently discards it."
+        "why": "The sidecar runs from `docker run --rm` with no volume, and the in-container fallback cluster lives under TMPDIR and dies with the job. Within one job the fallback does persist across commands - it is the same cluster each time `.venv/bin/sandbox-db` is called - but nothing here can tell a change that preserves data across a deploy from one that silently discards it."
       },
       {
         "what": "Connection pooling and concurrency.",
@@ -121,11 +125,22 @@
           "app/settings.py",
           "app/db.py"
         ],
-        "why": "DATABASE_URL points at a throwaway Postgres over loopback with a published password and no sslmode. A change to how the connection string is built, or to what the app does when a credential is absent, has no realistic case here."
+        "why": "DATABASE_URL points at a throwaway Postgres over loopback with a published password and no sslmode, and the in-container fallback is initdb'd with `-A trust`, so it does not check the password at all. A change to how the connection string is built, or to what the app does when a credential is absent or wrong, has no realistic case here."
       },
       {
-        "what": "Any PostgreSQL version, extension or configuration other than postgres:17-alpine's defaults.",
-        "why": "The sandbox pins the image the repo's own compose.yaml and CI use. What the owner actually runs is not recorded anywhere in this repo, so version-specific SQL or a dependency on an extension would pass here and fail there."
+        "what": "Agreement between PostgreSQL versions. A role's agent container runs the tests on a different major version than the trial does.",
+        "paths": [
+          "app/models.py",
+          "app/db.py"
+        ],
+        "why": "The sidecar is pinned to postgres:17-alpine, the image compose.yaml and ci.yml use. The fallback cluster inside an agent container is whatever the runner image ships, measured here as PostgreSQL 18.7. The suite passes on both, but version-specific SQL could pass for a builder and fail in the gates, or the reverse. What the owner actually runs is recorded nowhere in this repo, so neither number is known to be right."
+      },
+      {
+        "what": "The app as it would actually be served: a single non-reloading process.",
+        "paths": [
+          "app/main.py"
+        ],
+        "why": "commands.run is now `uvicorn --reload`, a file-watching supervisor that re-execs a worker, so that a builder's edit reaches the app already running on the runner. Nothing here exercises startup cost, a worker count above one, or any behaviour that differs between the reloader's child and a plain process. The lifespan's create_all() does run on every reload, which is harmless only because it is idempotent."
       }
     ]
   },
@@ -183,7 +198,64 @@
       "tried": "trial of round 1: install, build, test, run",
       "observed": "reached renders, as claimed",
       "changed": null
+    },
+    {
+      "attempt": 10,
+      "tried": "Read the amendment report at /tmp/gh-aw/agent/bsf/setup/amend.json, then read how a role actually gets a sandbox: bsf.mjs's startSandbox, serveOnHost and runTrial, and the sandbox block of .github/workflows/factory-role-builder.md and its -host variant.",
+      "observed": "The builder's two complaints have one cause each, and neither is a mistake in round 1's commands. (1) Services are started on the runner with `docker run -p 127.0.0.1:<port>:<port>`, while the role's agent runs in a container on its own network at 172.30.0.0/24. The host-access variant of the role is selected by needsHost(), which is true because this manifest has a service - but it opens exactly one host port, `allow-host-ports: [8787]`, and serveOnHost spends it on a TCP forwarder to the app. There is no second port for 5432 and no way to ask for one from the manifest. (2) serveOnHost starts commands.run once, before the agent begins, and round 1 deliberately made that a non-reloading process, so a route added afterwards cannot appear in it.",
+      "changed": "Settled the shape of the amendment: stop trying to reach the runner's database, and give the agent's own container one; and make the already-running app reload. Kept the services entry, because deleting it would also drop the role back to the non-host variant and lose port 8787."
+    },
+    {
+      "attempt": 11,
+      "tried": "Reproduced the builder's failure in this setup container to be sure it is the same one: connected to 127.0.0.1:5432.",
+      "observed": "connect_ex returned 111, ECONNREFUSED - the same refusal the report describes. This container is 172.30.0.20/24 with no route to the runner and no host.docker.internal in DNS. Also checked what the image does have: /usr/lib/postgresql/18/bin with initdb, pg_ctl, psql and createdb, and three hostedtoolcache interpreters.",
+      "changed": "Chose the fallback: start a real PostgreSQL from the binaries already in the image, on the same 127.0.0.1:5432 DATABASE_URL already names, rather than changing DATABASE_URL or swapping in SQLite. SQLite was rejected on the report's own evidence - its CURRENT_TIMESTAMP is second-resolution, so the assertion the builder could not make (two consecutive POSTs have distinct recorded_at) would still be unmakeable."
+    },
+    {
+      "attempt": 12,
+      "tried": "Wrote `.venv/bin/sandbox-db` and ran it three ways: with nothing listening, with the cluster it had just started still up, and with DATABASE_URL unset.",
+      "observed": "Cold: initdb (PostgreSQL) 18.7, cluster up on 127.0.0.1:5432, database pyapi_test, exit 0. Warm: '127.0.0.1:5432 already answers; using it', exit 0, nothing started. Unset: exit 1 naming DATABASE_URL and the .runtime.env to source. One bug found and fixed on the way - the first version wrote initdb.log into the data directory before initdb ran, and initdb refuses a non-empty directory; the logs now sit beside the data directory rather than in it.",
+      "changed": "Made install write the helper into .venv/bin/, and put `.venv/bin/sandbox-db &&` in front of test, run and seed. It is parked in .venv/ because that is the only install-created, gitignored, workspace-local directory, and the workspace is what the runner and the agent containers share. The check is 'does this address answer', not 'am I in a container', so on the runner the sidecar wins and nothing extra starts."
+    },
+    {
+      "attempt": 13,
+      "tried": "Ran the manifest's test command in this container, where the builder got 11 passed and 11 skipped.",
+      "observed": "'database ready; cleared 0 row(s)', then 18 passed, 96% total coverage - the same result round 1 measured on the runner against postgres:17-alpine, now on 18.7 in the agent's own container. Also POSTed two readings back to back through the running app: recorded_at 07:17:38.358362Z and 07:17:38.366271Z, distinct, which is the assertion the report said needed Postgres.",
+      "changed": null
+    },
+    {
+      "attempt": 14,
+      "tried": "Tested the second half of the report - a new route appearing in the app that is already running. Started `uvicorn --reload --reload-dir app`, read /openapi.json, appended a GET /sensors route to app/main.py, and polled.",
+      "observed": "Before: ['/health', '/readings', '/sensors/{sensor}/summary'] - exactly the three the report saw. Two seconds after the write: ['/health', '/readings', '/sensors', '/sensors/{sensor}/summary'], and GET /sensors answered. Restored app/main.py afterwards.",
+      "changed": "Made commands.run `--reload --reload-dir app`, and added WATCHFILES_FORCE_POLLING=1 to env. --reload-dir app keeps the watcher off .venv/. The polling flag is the one thing here that is defensive rather than measured: the builder writes from a different mount namespace than the runner-side reloader watches, this container cannot test whether inotify crosses that, and polling does not care either way."
+    },
+    {
+      "attempt": 15,
+      "tried": "Checked round 1's stated reason for dropping --reload, rather than inheriting it. Replicated the trial's teardown exactly in node: spawn('bash', ['-c', run], {detached: true}), poll app_url, then process.kill(-child.pid, 'SIGTERM').",
+      "observed": "The app answered 200 at /docs, and 5 seconds after the group signal it answered nothing. `ps -eo pid,pgid,args` showed no surviving uvicorn or reloader process. Round 1's concern - that a supervisor makes the process group ambiguous - does not hold: the reloader and the worker it re-execs are both in bash's group and both die.",
+      "changed": "Removed the `uvicorn --reload` row from `dropped`, since it is no longer dropped, and recorded the measurement in history.md so the next round does not re-drop it on the old reasoning."
+    },
+    {
+      "attempt": 16,
+      "tried": "Ran every command as the written JSON holds it - read back out of manifest.json with json.load and executed, never retyped - from a cold start with .venv and the cluster deleted, in the closed environment the manifest's own env list produces.",
+      "observed": "install exit 0 in 10s. build exit 0: 'All checks passed!' and 'Success: no issues found in 7 source files'. test exit 0: started the local 18.7 cluster, then 18 passed, 96% total coverage. seed exit 0: 'seeded 5 readings across 2 sensors', and this time it reported '127.0.0.1:5432 already answers' rather than starting a second one. run: /docs answered 200 one second in; /health {'status':'ok'}; kitchen count 3 / min 19.0 / max 23.25 / mean 21.25; garage count 2 / 8.5 / 11.0 / 9.75; /sensors/nope/summary 404; celsius -400 422. Ran test three more times against the one cluster: 18 passed each time, 'cleared 5 row(s)' each time.",
+      "changed": null
+    },
+    {
+      "attempt": 17,
+      "tried": "Checked the two things that decide the tier rather than assuming them: ran build and test in an empty directory the way the trial's control step does, and opened app_url in a real browser under the new --reload run command.",
+      "observed": "Control: both exit 127 in an empty directory - they depend on this repo, so the control step passes and the tier is not forced to static. Browser: page title 'py-api - Swagger UI', all four operations and the schemas block rendered, full-page screenshot taken. One console error, the favicon at fastapi.tiangolo.com; the cdn.jsdelivr.net bundle loaded, which is what makes the page render at all.",
+      "changed": "Nothing. Kept tier renders. Left the working tree clean - app/main.py restored, .playwright-cli removed - and validated the file with `.factory/bin/bsf sandbox check --file`: 'valid sandbox manifest, tier renders'."
+    },
+    {
+      "attempt": 18,
+      "tried": "trial of round 1: install, build, test, control, run",
+      "observed": "reached renders, as claimed",
+      "changed": null
     }
   ],
-  "frozen_at": "2026-11-21T04:52:13.432Z"
+  "amended_by": [
+    "5223262fddb6abfe"
+  ],
+  "frozen_at": "2026-11-21T07:32:47.026Z"
 }
