@@ -1,32 +1,34 @@
 {
   "schema": "ledger/1",
-  "updated_at": "2026-11-21T07:24:12.480Z",
+  "updated_at": "2026-11-21T07:24:28.222Z",
   "open": [
     {
       "work_item": "wi_01M7Y4GJS8FDFMPE9JFHY603DW",
       "pipeline": "product_work",
       "status": "waiting_trust",
-      "fingerprint": "sha256:072f2ee178614c3af056df9f6906debee50da6570d9efb770eff3c6c1d2af44b",
       "priority": "normal",
-      "created_at": "2026-11-21T04:05:58.696Z"
+      "created_at": "2026-11-21T04:05:58.696Z",
+      "fingerprint": "sha256:072f2ee178614c3af056df9f6906debee50da6570d9efb770eff3c6c1d2af44b",
+      "source_ref": "#4"
     },
     {
       "work_item": "wi_01M7Y4H67421R4EKHKVB14FZ3N",
       "pipeline": "product_work",
       "status": "waiting_trust",
-      "fingerprint": "sha256:072f2ee178614c3af056df9f6906debee50da6570d9efb770eff3c6c1d2af44b",
       "priority": "normal",
-      "created_at": "2026-11-21T04:06:18.596Z"
+      "created_at": "2026-11-21T04:06:18.596Z",
+      "fingerprint": "sha256:072f2ee178614c3af056df9f6906debee50da6570d9efb770eff3c6c1d2af44b",
+      "source_ref": "#4"
     },
     {
       "work_item": "wi_01M7YCYXNYV7TD9KTEV15G0BVF",
       "pipeline": "product_work",
       "status": "in_review",
-      "fingerprint": "sha256:3d4060dbc5f1fc4278d950d78e3ac05611281e9698089032e9a90ff971f3321f",
       "priority": "normal",
       "created_at": "2026-11-21T06:33:37.214Z",
-      "source_ref": "#9",
-      "pr": 11
+      "fingerprint": "sha256:3d4060dbc5f1fc4278d950d78e3ac05611281e9698089032e9a90ff971f3321f",
+      "pr": 11,
+      "source_ref": "#9"
     }
   ],
   "recent": [],
