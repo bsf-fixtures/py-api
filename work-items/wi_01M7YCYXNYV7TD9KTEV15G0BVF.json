@@ -14,8 +14,10 @@
   "body": null,
   "priority": "normal",
   "fingerprint": "sha256:3d4060dbc5f1fc4278d950d78e3ac05611281e9698089032e9a90ff971f3321f",
-  "status": "queued",
-  "runs": [],
+  "status": "running",
+  "runs": [
+    "run_01M7YDNJZ50E93HWMNCPZ6QP9Z"
+  ],
   "pr": null,
   "parent": null,
   "related": [],
