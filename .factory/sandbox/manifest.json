@@ -5,9 +5,9 @@
   "commands": {
     "install": "PY=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3); \"$PY\" -m venv .venv && .venv/bin/pip install --quiet --disable-pip-version-check -e '.[dev]'",
     "build": ".venv/bin/ruff check . && .venv/bin/mypy app",
-    "run": ".venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000",
+    "run": "D=.factory/sandbox/stubs/sandbox-admin; if [ -d .factory/sandbox/stubs/stubs/sandbox-admin ]; then D=.factory/sandbox/stubs/stubs/sandbox-admin; fi; exec .venv/bin/uvicorn --app-dir \"$D\" sandbox_app:app --host 127.0.0.1 --port 8000",
     "test": ".venv/bin/python -c '\nimport sys, time\n\nfrom sqlalchemy import text\n\nfrom app.db import create_all, engine\n\nlast = None\nfor _ in range(60):\n    try:\n        create_all()\n        break\n    except Exception as exc:\n        last = exc\n        time.sleep(1)\nelse:\n    sys.exit(\"the sandbox database never answered at DATABASE_URL: %s\" % last)\n\nwith engine().begin() as conn:\n    n = conn.execute(\n        text(\"DELETE FROM readings WHERE sensor LIKE :prefix\"), {\"prefix\": \"test-%\"}\n    ).rowcount\nprint(\"database ready; cleared %d row(s) left by a previous test run\" % n)\n' && .venv/bin/pytest --cov=app --cov-report=term-missing",
-    "seed": ".venv/bin/python -c '\nfrom app.db import create_all, session\nfrom app.models import Reading\n\ncreate_all()\nrows = [(\"kitchen\", 21.5), (\"kitchen\", 19.0), (\"kitchen\", 23.25),\n        (\"garage\", 8.5), (\"garage\", 11.0)]\nwith session() as db:\n    for sensor, celsius in rows:\n        db.add(Reading(sensor=sensor, celsius=celsius))\nprint(\"seeded %d readings across 2 sensors\" % len(rows))\n'"
+    "seed": "S=.factory/sandbox/stubs/sandbox-admin/sandbox_seed.py; if [ -f .factory/sandbox/stubs/stubs/sandbox-admin/sandbox_seed.py ]; then S=.factory/sandbox/stubs/stubs/sandbox-admin/sandbox_seed.py; fi; .venv/bin/python \"$S\""
   },
   "app_url": "http://127.0.0.1:8000/docs",
   "env": [
@@ -15,7 +15,7 @@
       "name": "DATABASE_URL",
       "kind": "service",
       "value": "postgresql+psycopg://pyapi:pyapi-throwaway@127.0.0.1:5432/pyapi_test",
-      "why": "The only variable this repo reads. app/settings.py:18 is the single os.environ call in app/, and tests/conftest.py:16 is the only other one; nothing loads a .env file, which README.md states is deliberate. It points at the throwaway Postgres sidecar declared under services, never at anything real: the app creates its tables at startup and the test suite writes rows, so whatever this names gets written to. 127.0.0.1 is literal rather than 'localhost' as the README and ci.yml use, because localhost can resolve to ::1 where a service bound to 127.0.0.1 does not answer."
+      "why": "The only variable this repo reads. app/settings.py:18 is the single os.environ call in app/, and tests/conftest.py:16 is the only other one; nothing loads a .env file, which README.md states is deliberate. It points at the throwaway Postgres sidecar declared under services, never at anything real: the app creates its tables at startup and the test suite writes rows, so whatever this names gets written to. 127.0.0.1 is literal rather than 'localhost' as the README and ci.yml use, because localhost can resolve to ::1 where a service bound to 127.0.0.1 does not answer. A role working in a container cannot dial this address itself - only the app's port is bridged in - so the same database is reachable from there over HTTP under /__sandbox; see capabilities.exercised."
     }
   ],
   "services": [
@@ -83,14 +83,18 @@
     "exercised": [
       "All four HTTP endpoints against a real PostgreSQL 17: GET /health, POST /readings, GET /readings, GET /sensors/{sensor}/summary.",
       "The whole test suite with the database present - 18 passed, including the 7 in tests/test_api.py that skip when DATABASE_URL is unset. 96% total coverage via pytest-cov.",
+      "Reading and writing the sandbox database from a role's own container, over the app's port, which is the only thing bridged in. `run` serves .factory/sandbox/stubs/sandbox-admin/sandbox_app.py: that module is app.main:app itself plus four routes under /__sandbox, every one include_in_schema=False, so /openapi.json and /docs are byte-identical to the unmodified service (compared at setup, identical). From inside a container they are http://host.docker.internal:8787/__sandbox/... ; on the runner, http://127.0.0.1:8000/__sandbox/... .",
+      "POST /__sandbox/sql with {\"sql\": \"...\"} runs statements against DATABASE_URL and returns their rows as JSON; add {\"params\": {...}} to bind :name values. Measured at setup: `DELETE FROM readings` reported rowcount 5; a GROUP BY returned both sensors; a three-statement script returned all three result sets; an unknown table came back 400 with psycopg's own UndefinedTable message rather than a bare 500.",
+      "States the HTTP API cannot construct are reachable through that endpoint and are then visible to the real API: a row with recorded_at backdated to 2019 and celsius -300 (below the -273.15 floor ReadingIn enforces) was inserted and came back from GET /readings?sensor=attic.",
+      "POST /__sandbox/seed applies the same five rows as the `seed` command - one definition, SEED_ROWS in sandbox_seed.py, which the command runs as a script and the route imports, so they cannot drift. POST /__sandbox/reset empties readings and restarts its id sequence, so reset-then-seed gives ids 1..5 every time and an acceptance check may name one. Measured at setup: reset {\"deleted\": 6}, seed {\"seeded\": 5}, then GET /sensors/kitchen/summary returned count 3, min 19.0, max 23.25, mean 21.25.",
       "Table creation from app/models.py by Base.metadata.create_all() in the FastAPI startup lifespan.",
       "SQLAlchemy ORM reads and writes through app/db.py's session() context manager, including its commit-on-success and rollback-on-exception path.",
       "Pydantic validation at the edge: 422 for a reading below -273.15C or above 1000C, and for an empty sensor name.",
       "The 404 for a sensor with no readings, rather than a summary of zeros (app/summary.py:14 raising, app/main.py:72 translating).",
       "The clamp on GET /readings?limit= to 1..1000 (app/main.py:51).",
       "/health as a genuine readiness check: it executes SELECT 1 through a session, so it fails when the database is gone.",
-      "ruff check . and mypy app under strict = true, the two static checks CI runs before pytest.",
-      "The rendered Swagger UI at http://127.0.0.1:8000/docs in a real browser - all four operations and all five schemas, captured as a full-page screenshot."
+      "ruff check . and mypy app under strict = true, the two static checks CI runs before pytest. ruff lints .factory/sandbox/stubs/ too, since those files are committed; both modules are clean under the repo's own rule set.",
+      "The rendered Swagger UI at http://127.0.0.1:8000/docs in a real browser - all four operations and all five schemas, captured as a full-page screenshot, with the /__sandbox routes absent from it."
     ],
     "not_exercised": [
       {
@@ -98,7 +102,7 @@
         "paths": [
           "app/models.py"
         ],
-        "why": "There is no migration tool in this repo - no alembic/ directory and nothing in pyproject.toml's dependencies. The app calls Base.metadata.create_all(), which creates tables that do not exist and never alters one that does. The sandbox's database is empty at every start, so a column change that would break a populated table passes here."
+        "why": "There is no migration tool in this repo - no alembic/ directory and nothing in pyproject.toml's dependencies. The app calls Base.metadata.create_all(), which creates tables that do not exist and never alters one that does. The sandbox's database is empty at every start, so a column change that would break a populated table passes here. POST /__sandbox/sql can now put rows in before the change and read them after, which makes such a break visible if a check thinks to look; it does not make it fail on its own."
       },
       {
         "what": "Durability: data surviving a restart, retention, or backup.",
@@ -113,7 +117,7 @@
         "paths": [
           "app/db.py"
         ],
-        "why": "The engine's pool_pre_ping (app/db.py:19) and the module-level engine and sessionmaker singletons are only ever driven one request at a time here. Pool exhaustion, a session leaking across requests, and reconnecting after the database drops a connection are all unreached."
+        "why": "The engine's pool_pre_ping (app/db.py:19) and the module-level engine and sessionmaker singletons are only ever driven one request at a time here. Pool exhaustion, a session leaking across requests, and reconnecting after the database drops a connection are all unreached. /__sandbox/sql shares that one engine, so it cannot be used to force contention either."
       },
       {
         "what": "How the database connection is secured - TLS, sslmode, or any credential handling.",
@@ -125,7 +129,14 @@
       },
       {
         "what": "Any PostgreSQL version, extension or configuration other than postgres:17-alpine's defaults.",
-        "why": "The sandbox pins the image the repo's own compose.yaml and CI use. What the owner actually runs is not recorded anywhere in this repo, so version-specific SQL or a dependency on an extension would pass here and fail there."
+        "why": "The sandbox pins the image the repo's own compose.yaml and CI use. What the owner actually runs is not recorded anywhere in this repo, so version-specific SQL or a dependency on an extension would pass here and fail there. Setup itself could not run Docker, so every measurement below was taken against the PostgreSQL 18.7 server installed in the setup agent's own machine, with the same throwaway user, password and database name."
+      },
+      {
+        "what": "Anything that needs a port other than the app's from inside a role's container - a psql shell, a database GUI, a second service.",
+        "paths": [
+          ".factory/sandbox/manifest.json"
+        ],
+        "why": "bsf forwards exactly one port to the container: the one in app_url, published as host.docker.internal:8787 (serveOnHost in the runner). There is no manifest field for a second one. /__sandbox is the whole of what this amendment could add - SQL over HTTP, not a connection. A role needing a real psql session, a protocol-level test, or COPY FROM a local file still cannot have one here."
       }
     ]
   },
@@ -183,7 +194,52 @@
       "tried": "trial of round 1: install, build, test, run",
       "observed": "reached renders, as claimed",
       "changed": null
+    },
+    {
+      "attempt": 10,
+      "tried": "Amendment fe3d81f91d435c56. The verifier reported that it could reach neither the database at DATABASE_URL nor the manifest's `seed` command from its container. Read the runner's own code to find what a container actually gets, rather than guessing at it: serveOnHost in bsf.mjs, and schema/sandbox.json for what the manifest may declare.",
+      "observed": "serveOnHost takes the port out of app_url, starts one TCP forwarder on 0.0.0.0:8787 pointing at it, and writes /tmp/gh-aw/agent/bsf/app.json. That is the only bridge. Services are started with -p 127.0.0.1:<port>:<port>, which a container cannot reach, and the manifest schema has no field for exposing a second port. So the report is right and no combination of services, egress or env fixes it.",
+      "changed": "Settled on carrying database access over the one port that does get through, rather than looking for a second one."
+    },
+    {
+      "attempt": 11,
+      "tried": "Two ways to put admin routes on that port. First a stdlib reverse proxy on 8000 forwarding to uvicorn on 8001 and answering /__sandbox itself. Then, instead, an ASGI module that imports app.main:app and adds the routes to that same FastAPI instance.",
+      "observed": "The proxy means two processes, a second port, a 502 window while uvicorn starts, and a hand-written HTTP implementation between the verifier and the app it is verifying. The ASGI module is one process on one port and no proxy; the only question it raises is whether it changes what the app looks like.",
+      "changed": "Dropped the proxy. Wrote .factory/sandbox/stubs/sandbox-admin/sandbox_app.py, which is `from app.main import app` plus four routes under /__sandbox, each marked include_in_schema=False. `run` serves it with uvicorn --app-dir, so the repo is untouched and the module ships with the sandbox."
+    },
+    {
+      "attempt": 12,
+      "tried": "Checked the thing that would make that trade bad: whether the added routes change the app under verification. Fetched /openapi.json from the served module and compared it with app.main:app's own app.openapi(), then opened /docs in a real browser.",
+      "observed": "The two documents are identical. /openapi.json lists /health, /readings and /sensors/{sensor}/summary and contains no occurrence of the string __sandbox. Swagger UI rendered the same four operations and five schemas as before the amendment, with the same single console error - the favicon at fastapi.tiangolo.com, blocked by this agent's firewall.",
+      "changed": "Nothing. Kept tier `renders` and app_url as they were."
+    },
+    {
+      "attempt": 13,
+      "tried": "Exercised the new surface against a real PostgreSQL 18.7 through the manifest's own `run` command: reset, seed, a GROUP BY, a three-statement script, a parameterised INSERT of a backdated out-of-range row, `DELETE FROM readings`, and a statement against a table that does not exist.",
+      "observed": "reset {\"deleted\": 6}; seed {\"seeded\": 5, \"sensors\": [\"garage\", \"kitchen\"]}; GROUP BY returned both sensors with their counts; DELETE FROM readings returned rowcount 5 and GET /sensors/kitchen/summary then 404; the backdated row (recorded_at 2019-03-01, celsius -300, which ReadingIn rejects with a 422) came back from GET /readings?sensor=attic. Two first drafts were wrong and are fixed: a SELECT reported rowcount -1, because that is what SQLAlchemy returns for one, and a multi-statement script returned only the first result set, because CursorResult stops there. run_sql now walks the DBAPI cursor's nextset() and returns every set under `results`, with the last statement's rows at the top level.",
+      "changed": "Fixed both in sandbox_seed.py. Each route reports a database error as a 400 carrying psycopg's own message, so a role sees what the database said."
+    },
+    {
+      "attempt": 14,
+      "tried": "Ran the whole manifest end to end as written: install, build, test (twice in a row), seed, run, then the build and test commands in an empty directory the way the trial's control step does.",
+      "observed": "install exit 0 on Python 3.13.18; build exit 0 - ruff now also lints the two new modules under .factory/sandbox/stubs/, which it does because they are committed, and they pass the repo's own E,F,I,UP,B,SIM set at line-length 100; mypy app unchanged at 7 files; test 18 passed, 96% coverage, both runs; seed printed \"seeded 5 readings across 2 sensors\"; /docs answered 200. In an empty directory both commands exit 127, so the control step still fails there, as it must.",
+      "changed": "Nothing."
+    },
+    {
+      "attempt": 15,
+      "tried": "Looked at how a later round would get these files, since factory-setup-trial.yml copies the design's stubs/ with `cp -R \"$DESIGN/stubs\" .factory/sandbox/stubs` and the freeze step, unlike it, does `rm -rf` first.",
+      "observed": "Once this amendment merges, .factory/sandbox/stubs exists in the repo, so that cp lands the next round's copy at .factory/sandbox/stubs/stubs/ and leaves the old one in place. A later round would then be trialled against the files it did not write, and would have no way to tell.",
+      "changed": "`run` and `seed` now prefer .factory/sandbox/stubs/stubs/sandbox-admin when it is there and fall back to the flat path otherwise. Tested both layouts: each resolves to the copy it should and seeds 5 rows."
+    },
+    {
+      "attempt": 16,
+      "tried": "trial of round 1: install, build, test, control, run",
+      "observed": "reached renders, as claimed",
+      "changed": null
     }
   ],
-  "frozen_at": "2026-11-21T04:52:13.432Z"
+  "frozen_at": "2026-11-21T07:55:36.886Z",
+  "amended_by": [
+    "fe3d81f91d435c56"
+  ]
 }
