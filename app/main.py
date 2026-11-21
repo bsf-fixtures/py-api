@@ -1,19 +1,20 @@
 """The service.
 
-Four endpoints, enough for API-level runtime verification: write a reading,
-read them back, summarize one sensor, and a health check the sandbox can poll
-to know the service and its database are both up.
+Five endpoints, enough for API-level runtime verification: write a reading,
+read them back, list the sensors that have reported, summarize one sensor, and
+a health check the sandbox can poll to know the service and its database are
+both up.
 """
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import create_all, session
 from app.models import Reading
-from app.schemas import ReadingIn, ReadingOut, SensorSummary
+from app.schemas import ReadingIn, ReadingOut, SensorOut, SensorSummary
 from app.summary import summarize
 
 
@@ -57,6 +58,23 @@ def list_readings(sensor: str | None = None, limit: int = 100) -> list[ReadingOu
         return [
             ReadingOut(id=r.id, sensor=r.sensor, celsius=r.celsius, recorded_at=r.recorded_at)
             for r in rows
+        ]
+
+
+@app.get("/sensors", response_model=list[SensorOut])
+def list_sensors() -> list[SensorOut]:
+    """Every sensor that has at least one reading. Empty table, empty list."""
+    stmt = (
+        select(Reading.sensor, func.count(Reading.id), func.max(Reading.recorded_at))
+        .group_by(Reading.sensor)
+        .order_by(Reading.sensor)
+    )
+    with session() as db:
+        # Unpacked rather than read by name: Row subclasses tuple, so `.count`
+        # is tuple.count and not the aggregate.
+        return [
+            SensorOut(sensor=sensor, count=count, latest_reading_at=latest)
+            for sensor, count, latest in db.execute(stmt).all()
         ]
 
 
