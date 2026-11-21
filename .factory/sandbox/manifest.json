@@ -7,7 +7,8 @@
     "build": ".venv/bin/ruff check . && .venv/bin/mypy app",
     "run": ".venv/bin/sandbox-db && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app",
     "test": ".venv/bin/sandbox-db && .venv/bin/python -c '\nimport sys, time\n\nfrom sqlalchemy import text\n\nfrom app.db import create_all, engine\n\nlast = None\nfor _ in range(60):\n    try:\n        create_all()\n        break\n    except Exception as exc:\n        last = exc\n        time.sleep(1)\nelse:\n    sys.exit(\"the sandbox database never answered at DATABASE_URL: %s\" % last)\n\nwith engine().begin() as conn:\n    n = conn.execute(\n        text(\"DELETE FROM readings WHERE sensor LIKE :prefix\"), {\"prefix\": \"test-%\"}\n    ).rowcount\nprint(\"database ready; cleared %d row(s) left by a previous test run\" % n)\n' && .venv/bin/pytest --cov=app --cov-report=term-missing",
-    "seed": ".venv/bin/sandbox-db && .venv/bin/python -c '\nfrom app.db import create_all, session\nfrom app.models import Reading\n\ncreate_all()\nrows = [(\"kitchen\", 21.5), (\"kitchen\", 19.0), (\"kitchen\", 23.25),\n        (\"garage\", 8.5), (\"garage\", 11.0)]\nwith session() as db:\n    for sensor, celsius in rows:\n        db.add(Reading(sensor=sensor, celsius=celsius))\nprint(\"seeded %d readings across 2 sensors\" % len(rows))\n'"
+    "seed": ".venv/bin/sandbox-db && .venv/bin/python -c '\nfrom app.db import create_all, session\nfrom app.models import Reading\n\ncreate_all()\nrows = [(\"kitchen\", 21.5), (\"kitchen\", 19.0), (\"kitchen\", 23.25),\n        (\"garage\", 8.5), (\"garage\", 11.0)]\nwith session() as db:\n    for sensor, celsius in rows:\n        db.add(Reading(sensor=sensor, celsius=celsius))\nprint(\"seeded %d readings across 2 sensors\" % len(rows))\n'",
+    "coverage": ".venv/bin/sandbox-db && .venv/bin/python -c '\nimport sys, time\n\nfrom sqlalchemy import text\n\nfrom app.db import create_all, engine\n\nlast = None\nfor _ in range(60):\n    try:\n        create_all()\n        break\n    except Exception as exc:\n        last = exc\n        time.sleep(1)\nelse:\n    sys.exit(\"the sandbox database never answered at DATABASE_URL: %s\" % last)\n\nwith engine().begin() as conn:\n    n = conn.execute(\n        text(\"DELETE FROM readings WHERE sensor LIKE :prefix\"), {\"prefix\": \"test-%\"}\n    ).rowcount\nprint(\"database ready; cleared %d row(s) left by a previous test run\" % n)\n' && .venv/bin/pytest --cov=app --cov-report=term-missing --cov-report=xml"
   },
   "app_url": "http://127.0.0.1:8000/docs",
   "env": [
@@ -94,7 +95,9 @@
       "The clamp on GET /readings?limit= to 1..1000 (app/main.py:51).",
       "/health as a genuine readiness check: it executes SELECT 1 through a session, so it fails when the database is gone.",
       "ruff check . and mypy app under strict = true, the two static checks CI runs before pytest.",
-      "The rendered Swagger UI at http://127.0.0.1:8000/docs in a real browser - all four operations and all five schemas, captured as a full-page screenshot."
+      "The rendered Swagger UI at http://127.0.0.1:8000/docs in a real browser - all four operations and all five schemas, captured as a full-page screenshot.",
+      "Diff and total coverage. commands.coverage runs the same 18 tests as commands.test and adds --cov-report=xml; the factory's own Cobertura reader, run here over the written coverage.xml, resolved all 7 app/ files to their repo-relative paths (app/db.py 23/26, app/main.py 42/42, app/settings.py 10/11, and so on) and 96.4% of lines overall. Before this amendment the coverage gate found no report and was neutral on every PR.",
+      "mypy as a counted static check. The declared `mypy` check writes SARIF the static gate parses: clean over app/ today (0 findings), and with two deliberate errors planted in a scratch file it produced two results with ruleIds `return-value` and `no-untyped-def` against app/_scratch_check.py, which is the per-rule-per-file shape the ratchet counts."
     ],
     "not_exercised": [
       {
@@ -141,6 +144,13 @@
           "app/main.py"
         ],
         "why": "commands.run is now `uvicorn --reload`, a file-watching supervisor that re-execs a worker, so that a builder's edit reaches the app already running on the runner. Nothing here exercises startup cost, a worker count above one, or any behaviour that differs between the reloader's child and a plain process. The lifespan's create_all() does run on every reload, which is harmless only because it is idempotent."
+      },
+      {
+        "what": "Type checking of the test suite itself, and coverage of test code.",
+        "paths": [
+          "tests/"
+        ],
+        "why": "The declared mypy check runs `mypy app`, and commands.coverage measures `--cov=app`, both following .github/workflows/ci.yml. mypy is in fact clean over `app tests` here (12 source files), but checking tests would make the static gate stricter than commands.build, so an untyped helper added to a new test is not counted. Coverage has the sharper edge: a change that touches only tests/ has no file in the report, diffCoverage returns null, and runCoverageGate reads null as 100%, so it passes the coverage gate with nothing measured."
       }
     ]
   },
@@ -252,10 +262,53 @@
       "tried": "trial of round 1: install, build, test, control, run",
       "observed": "reached renders, as claimed",
       "changed": null
+    },
+    {
+      "attempt": 19,
+      "tried": "Read the amendment report, then read what the gates actually do with these two fields rather than guessing: bsf.mjs's gatesCoverage/readCoverage/fromCoberturaish, gatesTests, runStaticTools/runSarifCheck/countSarif, and the static and verification jobs of .github/workflows/factory-gates.yml.",
+      "observed": "Three facts settled the design. (1) runStaticTools already runs ruff natively whenever a pyproject.toml exists, and has native support only for eslint, ruff, clippy, go-vet, rubocop and semgrep - so mypy is the one checker this repo runs that the factory does not. (2) gatesTests runs `build && coverage` when commands.coverage is set, and gatesCoverage reads the report off disk in the same job straight afterwards, so one report written into the workspace serves both. factory.yaml has existing_ci.test_check null, so the gate always runs the tests itself rather than reading a CI check and leaving no report behind. (3) runSarifCheck tolerates a non-zero exit but treats a missing SARIF as 'unavailable', which is the lever for failing loudly on a crash.",
+      "changed": "Settled the shape: commands.coverage is commands.test with --cov-report=xml appended and nothing else, so the tests gate runs the same 18 tests; one static check, mypy, with a converter rather than a new tool; ruff left undeclared."
+    },
+    {
+      "attempt": 20,
+      "tried": "Ran commands.coverage end to end against a real database in this container, then parsed the coverage.xml it wrote with the factory's own fromCoberturaish - lifted verbatim out of bsf.mjs into a scratch node module - rather than trusting that coverage.py's output is the Cobertura the gate expects.",
+      "observed": "18 passed, exit 0, 'Coverage XML written to file coverage.xml' in 3.4s. coverage.py writes <source>/home/runner/work/py-api/py-api/app</source> with bare filenames like db.py, which only resolves because the gate's reader joins each <source> to the filename and keeps the one that exists on disk - it does, because the tests gate and the coverage gate run in the same job and the same workspace. The reader returned total_pct 96.4 and seven keys, every one of them app/<file>.py, which is the form changedFilesSince() yields and therefore the form diffCoverage can match.",
+      "changed": "Kept path 'coverage.xml' and format 'cobertura'. coverage.xml is already in the repo's .gitignore, so the report does not show up in a builder's working tree."
+    },
+    {
+      "attempt": 21,
+      "tried": "Built the mypy SARIF converter and tested its three paths: a clean repo, a repo with deliberate type errors, and a mypy that cannot run at all.",
+      "observed": "Clean: 'mypy: 0 finding(s)', valid SARIF with an empty results array - which is what the gate needs to start the ratchet at zero. With app/_scratch_check.py holding a bad return type and an unannotated def: two results, ruleIds return-value and no-untyped-def, uri app/_scratch_check.py, startLines 2 and 5. Pointed at a non-existent package so mypy exited 2: the converter printed why and wrote no SARIF, so the check reports unavailable rather than a false all-clear. The scratch file was deleted afterwards and the working tree left clean.",
+      "changed": "Settled the command, including the rc guard and the rm -f of a previous run's SARIF. mypy notes are skipped, since they carry no error code and are attached to a finding that is already counted."
+    },
+    {
+      "attempt": 22,
+      "tried": "Read every command back out of the written manifest.json with json.load and ran them, to be sure nothing was lost escaping the embedded Python and the heredoc into JSON, then validated the file with `.factory/bin/bsf sandbox check --file`.",
+      "observed": "Everything passes from a cold start - .venv deleted, the fallback cluster deleted - in an environment holding only PATH, HOME, TMPDIR, LANG, CI and this manifest's own two variables, which is what closedEnv() builds. install exit 0, Python 3.13.18. build exit 0: 'All checks passed!' and 'Success: no issues found in 7 source files'. test exit 0: the preamble started the local cluster, then 18 passed, 96%. coverage exit 0: 18 passed, 'Coverage XML written to file coverage.xml'. seed exit 0: '127.0.0.1:5432 already answers', 'seeded 5 readings across 2 sensors'. The mypy check: 0 findings, SARIF written. run: /docs 200, /health {\"status\":\"ok\"}, /sensors/kitchen/summary count 3 / min 19.0 / max 23.25 / mean 21.25. The control step the trial does - build and test in an empty directory - gave exit 127 for both, so they still depend on this repo. `bsf sandbox check --file`: 'valid sandbox manifest, tier renders'. One thing this round did not change: install, build, test, seed, run, env, services, egress, stubs and app_url are byte-identical to the frozen manifest, because the amendment asked for two missing fields and nothing that already works needed touching.",
+      "changed": null
+    },
+    {
+      "attempt": 23,
+      "tried": "trial of round 1: install, build, test, control, run",
+      "observed": "reached renders, as claimed",
+      "changed": null
     }
   ],
   "amended_by": [
-    "5223262fddb6abfe"
+    "5223262fddb6abfe",
+    "a37e179850e4443a"
   ],
-  "frozen_at": "2026-11-21T07:32:47.026Z"
+  "frozen_at": "2026-11-21T10:04:57.609Z",
+  "coverage_report": {
+    "path": "coverage.xml",
+    "format": "cobertura"
+  },
+  "static_checks": [
+    {
+      "name": "mypy",
+      "command": "mkdir -p /tmp/bsf-sarif && rm -f /tmp/bsf-sarif/mypy.sarif /tmp/bsf-sarif/mypy.jsonl; .venv/bin/mypy --output json --no-error-summary app > /tmp/bsf-sarif/mypy.jsonl; rc=$?; .venv/bin/python -I - \"$rc\" /tmp/bsf-sarif/mypy.jsonl /tmp/bsf-sarif/mypy.sarif <<'MYPY_SARIF'\nimport json, sys\n\nrc, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]\nif rc not in (0, 1):\n    sys.exit(\n        \"mypy exited %d, which is a crash or a bad invocation rather than findings; \"\n        \"writing no SARIF so the gate drops this check instead of reading it as clean\" % rc\n    )\n\nresults = []\nwith open(src, encoding=\"utf-8\") as fh:\n    for line in fh:\n        line = line.strip()\n        if not line.startswith(\"{\"):\n            continue\n        d = json.loads(line)\n        if d.get(\"severity\") == \"note\":\n            continue\n        results.append({\n            \"ruleId\": d.get(\"code\") or \"mypy\",\n            \"level\": \"error\" if d.get(\"severity\") == \"error\" else \"warning\",\n            \"message\": {\"text\": d.get(\"message\") or \"mypy finding\"},\n            \"locations\": [{\n                \"physicalLocation\": {\n                    \"artifactLocation\": {\"uri\": d.get(\"file\") or \"\"},\n                    \"region\": {\"startLine\": max(1, int(d.get(\"line\") or 1))},\n                }\n            }],\n        })\n\nsarif = {\n    \"version\": \"2.1.0\",\n    \"$schema\": \"https://json.schemastore.org/sarif-2.1.0.json\",\n    \"runs\": [{\n        \"tool\": {\"driver\": {\"name\": \"mypy\", \"informationUri\": \"https://mypy-lang.org/\"}},\n        \"results\": results,\n    }],\n}\nwith open(dst, \"w\", encoding=\"utf-8\") as fh:\n    json.dump(sarif, fh)\nprint(\"mypy: %d finding(s) written to %s\" % (len(results), dst))\nMYPY_SARIF\n",
+      "sarif": "/tmp/bsf-sarif/mypy.sarif",
+      "why": "mypy under `strict = true` is the second checker .github/workflows/ci.yml runs and the second half of commands.build, and bsf's runStaticTools has no native mypy, so without this entry every type error the repo already forbids is invisible to the static gate. ruff is deliberately not declared here: runStaticTools runs it natively whenever a pyproject.toml is present, so declaring it would count each ruff finding twice. mypy has no SARIF writer, so the command converts its own `--output json` lines - one JSON object per finding, each with the repo-relative file, the line and the error code - into SARIF with the venv's interpreter. The error code becomes the SARIF ruleId, which is what the gate ratchets per rule per file. The converter refuses to write a SARIF when mypy exits anything other than 0 or 1, because 2 means a crash or a bad invocation and a SARIF with no results would read as a clean repo; writing nothing makes the trial drop the check loudly instead. It writes outside the workspace so the checkout the gate also diffs stays clean. `mypy app` rather than `mypy app tests` matches ci.yml and commands.build, so the static gate never disagrees with the build a builder can run."
+    }
+  ]
 }
