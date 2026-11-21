@@ -9,5 +9,6 @@
   "why": "The manifest's DATABASE_URL points at 127.0.0.1:5432, but from this builder container that port is refused and host.docker.internal:5432 times out, so the manifest's own `test` command exits on its database precondition and the four new tests skip. The app at /tmp/gh-aw/agent/bsf/app.json is reachable (host.docker.internal:8787) but is a non-reloading uvicorn started before this change: GET /openapi.json still lists only ['/health', '/readings', '/sensors/{sensor}/summary'], so the new route cannot be exercised there and cannot be restarted from here. Checks run instead: `ruff check .` and `mypy app` clean; `pytest` with no DATABASE_URL = 11 passed, 11 skipped; and the endpoint driven through fastapi.testclient against a scratch SQLite file, which showed 200 with [] on an empty table, ascending sensor order, one entry per sensor with its reading count, latest_reading_at equal byte-for-byte to the POST's recorded_at, and /sensors/kitchen/summary 200 plus /sensors/nope/summary 404 unaffected. SQLite's CURRENT_TIMESTAMP is second-resolution, so the one assertion that two consecutive POSTs have distinct recorded_at values could not be shown there; it needs the Postgres microsecond now().",
   "work_item": "wi_01M7YCYXNYV7TD9KTEV15G0BVF",
   "reported_at": "2026-11-21T07:09:45.501Z",
-  "reports": 1
+  "reports": 1,
+  "dispatched_at": "2026-11-21T15:44:27.704Z"
 }
